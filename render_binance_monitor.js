@@ -2,49 +2,116 @@ import http from "http";
 import WebSocket from "ws";
 
 
-// =============================
-// SETTINGS
-// =============================
-
 const SYMBOL = "solusdt";
 
-
-// Тестовый уровень
 const LEVELS = [
     {
         symbol: "SOLUSDT",
-        price: 100.00,
+        price: 100,
         type: "above",
         triggered: false
     }
 ];
 
 
-// Telegram
-// пока оставляем пустым
-// потом вставим реальные значения
-
-const TELEGRAM_TOKEN = "ВСТАВИМ_ПОТОМ";
-const TELEGRAM_CHAT = "ВСТАВИМ_ПОТОМ";
+// Render Environment Variables
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const TELEGRAM_CHAT = process.env.TELEGRAM_CHAT;
 
 
 
-// =============================
-// TELEGRAM
-// =============================
+console.log(
+    "Telegram variables:",
+    {
+        token_exists: !!TELEGRAM_TOKEN,
+        chat_exists: !!TELEGRAM_CHAT
+    }
+);
+
+
+
+async function testTelegramConnection(){
+
+    try{
+
+        const r = await fetch(
+            "https://api.telegram.org"
+        );
+
+        console.log(
+            "Telegram connection status:",
+            r.status
+        );
+
+
+    }catch(e){
+
+        console.log(
+            "Telegram connection error:",
+            e.message
+        );
+
+    }
+
+}
+
+
+
+async function testTelegramBot(){
+
+    if(!TELEGRAM_TOKEN){
+
+        console.log(
+            "Telegram token missing"
+        );
+
+        return;
+    }
+
+
+    try{
+
+        const url =
+        `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getMe`;
+
+
+        const r = await fetch(url);
+
+
+        console.log(
+            "Telegram getMe status:",
+            r.status
+        );
+
+
+        console.log(
+            await r.text()
+        );
+
+
+    }catch(e){
+
+        console.log(
+            "Telegram getMe error:",
+            e.message
+        );
+
+    }
+
+}
+
+
 
 async function sendTelegram(text){
 
+
     console.log(
-        "TELEGRAM:",
+        "TELEGRAM MESSAGE:",
         text
     );
 
 
-    if(
-        TELEGRAM_TOKEN === "8543298569:AAGwSYlN9ZBKtgcqWvcJRyO_2y0SVsFTppQ" ||
-        TELEGRAM_CHAT === "-5482755811"
-    ){
+    if(!TELEGRAM_TOKEN || !TELEGRAM_CHAT){
 
         console.log(
             "Telegram disabled"
@@ -54,85 +121,71 @@ async function sendTelegram(text){
     }
 
 
+
     try{
 
 
-        const response =
-        await fetch(
-            `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
+        const url =
+        `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+
+
+        const r = await fetch(
+            url,
             {
-
                 method:"POST",
-
                 headers:{
                     "Content-Type":"application/json"
                 },
-
-
                 body:JSON.stringify({
 
-                    chat_id:
-                    TELEGRAM_CHAT,
-
+                    chat_id: TELEGRAM_CHAT,
                     text:text
 
                 })
-
             }
         );
 
 
         console.log(
-            "Telegram status:",
-            response.status
+            "Telegram send status:",
+            r.status
         );
 
-
-    }
-    catch(error){
 
         console.log(
-            "Telegram error:",
-            error.message
+            await r.text()
+        );
+
+
+    }catch(e){
+
+        console.log(
+            "Telegram send error:",
+            e.message
         );
 
     }
+
 
 }
 
 
 
-
-// =============================
-// LEVEL CHECK
-// =============================
-
-
 function checkLevels(price){
 
 
-    for(
-        const level of LEVELS
-    ){
+    for(const level of LEVELS){
 
 
-        if(
-            level.symbol !== "SOLUSDT"
-        )
-            continue;
-
-
-
-        if(
-            level.triggered
-        )
+        if(level.symbol !== "SOLUSDT")
             continue;
 
 
 
         if(
             level.type === "above" &&
-            price >= level.price
+            price >= level.price &&
+            !level.triggered
         ){
 
             level.triggered = true;
@@ -146,23 +199,6 @@ function checkLevels(price){
         }
 
 
-
-        if(
-            level.type === "below" &&
-            price <= level.price
-        ){
-
-            level.triggered = true;
-
-
-            sendTelegram(
-                `SOLUSDT ниже уровня ${level.price}. Цена ${price}`
-            );
-
-
-        }
-
-
     }
 
 
@@ -171,70 +207,54 @@ function checkLevels(price){
 
 
 
-// =============================
-// HTTP SERVER FOR RENDER
-// =============================
-
-
 const server =
 http.createServer(
 (req,res)=>{
 
-
-    res.writeHead(
-        200,
-        {
-            "Content-Type":
-            "text/plain"
-        }
-    );
-
+    res.writeHead(200);
 
     res.end(
         "Render Binance Monitor OK"
     );
-
 
 });
 
 
 
 server.listen(
+process.env.PORT || 10000,
+()=>{
 
-    process.env.PORT || 10000,
+    console.log(
+        "HTTP server started"
+    );
 
-    ()=>{
-
-        console.log(
-            "HTTP server started"
-        );
-
-    }
-
-);
+});
 
 
 
+// Telegram diagnostics
+testTelegramConnection();
+testTelegramBot();
 
-// =============================
-// BINANCE WEBSOCKET
-// =============================
 
+
+
+// Binance WebSocket
 
 const url =
 `wss://fstream.binance.com/market/stream?streams=${SYMBOL}@aggTrade`;
 
 
 console.log(
-    "Connecting Binance:",
-    url
+"Connecting Binance:",
+url
 );
 
 
 
 const ws =
 new WebSocket(url);
-
 
 
 
@@ -250,79 +270,48 @@ ws.on(
 
 
 
-
-
 ws.on(
 "message",
 (data)=>{
 
 
-    try{
+    const msg =
+    JSON.parse(data);
 
 
-        const msg =
-        JSON.parse(data);
+    const trade =
+    msg.data;
 
 
-
-        const trade =
-        msg.data;
-
-
-
-        const price =
-        Number(
-            trade.p
-        );
+    const price =
+    Number(trade.p);
 
 
 
-        console.log(
-            SYMBOL,
-            price
-        );
+    console.log(
+        SYMBOL,
+        price
+    );
 
 
 
-        checkLevels(
-            price
-        );
-
-
-    }
-
-    catch(error){
-
-
-        console.log(
-            "Parse error:",
-            error.message
-        );
-
-
-    }
+    checkLevels(price);
 
 
 });
-
-
 
 
 
 ws.on(
 "error",
-(error)=>{
-
+(err)=>{
 
     console.log(
-        "WS ERROR:",
-        error.message
+        "WS ERROR",
+        err.message
     );
 
-
 });
-
-
 
 
 
@@ -330,10 +319,8 @@ ws.on(
 "close",
 ()=>{
 
-
     console.log(
-        "BINANCE CLOSED"
+        "WS CLOSED"
     );
-
 
 });
