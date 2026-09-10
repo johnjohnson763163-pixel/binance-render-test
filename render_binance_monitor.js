@@ -42,8 +42,8 @@ async function sendTelegram(text){
 
 
     if(
-        TELEGRAM_TOKEN === "ВСТАВИМ_ПОТОМ" ||
-        TELEGRAM_CHAT === "ВСТАВИМ_ПОТОМ"
+        TELEGRAM_TOKEN === "8543298569:AAGwSYlN9ZBKtgcqWvcJRyO_2y0SVsFTppQ" ||
+        TELEGRAM_CHAT === "-5482755811"
     ){
 
         console.log(
