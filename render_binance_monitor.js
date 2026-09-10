@@ -5,11 +5,12 @@ import WebSocket from "ws";
 const SYMBOL = "solusdt";
 
 
-// Теперь уровни будут приходить через API
 let LEVELS = [];
 
+let nextId = 1;
 
-// Telegram
+
+
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT = process.env.TELEGRAM_CHAT;
 
@@ -23,40 +24,24 @@ async function sendTelegram(text){
     );
 
 
-    if(!TELEGRAM_TOKEN || !TELEGRAM_CHAT){
-
-        console.log(
-            "Telegram disabled"
-        );
-
+    if(!TELEGRAM_TOKEN || !TELEGRAM_CHAT)
         return;
-    }
 
 
     try{
 
-        const url =
-        `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-
-
-        const r = await fetch(
-            url,
+        await fetch(
+            `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
             {
                 method:"POST",
                 headers:{
                     "Content-Type":"application/json"
                 },
                 body:JSON.stringify({
-                    chat_id: TELEGRAM_CHAT,
+                    chat_id:TELEGRAM_CHAT,
                     text:text
                 })
             }
-        );
-
-
-        console.log(
-            "Telegram status:",
-            r.status
         );
 
 
@@ -85,35 +70,62 @@ function checkLevels(price){
 
 
 
-        if(
-            level.type === "above" &&
-            price >= level.price &&
-            !level.triggered
-        ){
-
-            level.triggered = true;
+        if(level.type==="above"){
 
 
-            sendTelegram(
-                `SOLUSDT пробил уровень ${level.price}. Цена ${price}`
-            );
+            if(
+                price >= level.price &&
+                !level.active
+            ){
+
+                level.active=true;
+
+
+                sendTelegram(
+                    `${level.symbol} пробил уровень ${level.price}. Цена ${price}`
+                );
+
+            }
+
+
+
+            if(price < level.price){
+
+                level.active=false;
+
+            }
+
 
         }
 
 
 
-        if(
-            level.type === "below" &&
-            price <= level.price &&
-            !level.triggered
-        ){
 
-            level.triggered = true;
+        if(level.type==="below"){
 
 
-            sendTelegram(
-                `SOLUSDT ниже уровня ${level.price}. Цена ${price}`
-            );
+            if(
+                price <= level.price &&
+                !level.active
+            ){
+
+                level.active=true;
+
+
+                sendTelegram(
+                    `${level.symbol} ниже уровня ${level.price}. Цена ${price}`
+                );
+
+            }
+
+
+
+            if(price > level.price){
+
+                level.active=false;
+
+            }
+
 
         }
 
@@ -125,11 +137,12 @@ function checkLevels(price){
 
 
 
-// HTTP API
+
+
 
 const server =
 http.createServer(
-async (req,res)=>{
+async(req,res)=>{
 
 
     res.setHeader(
@@ -139,27 +152,38 @@ async (req,res)=>{
 
 
 
-    // Получить уровни
+    const url =
+    new URL(
+        req.url,
+        "http://localhost"
+    );
+
+
+
+    // GET ALL LEVELS
+
     if(
-        req.method === "GET" &&
-        req.url === "/api/levels"
+        req.method==="GET" &&
+        url.pathname==="/api/levels"
     ){
 
         res.end(
-            JSON.stringify(
-                LEVELS
-            )
+            JSON.stringify(LEVELS)
         );
 
         return;
+
     }
 
 
 
-    // Добавить уровень
+
+
+    // ADD LEVEL
+
     if(
-        req.method === "POST" &&
-        req.url === "/api/levels"
+        req.method==="POST" &&
+        url.pathname==="/api/levels"
     ){
 
 
@@ -168,9 +192,7 @@ async (req,res)=>{
 
         req.on(
             "data",
-            chunk=>{
-                body += chunk;
-            }
+            c=>body+=c
         );
 
 
@@ -179,53 +201,40 @@ async (req,res)=>{
             ()=>{
 
 
-                try{
-
-
-                    const level =
-                    JSON.parse(body);
+                const data =
+                JSON.parse(body);
 
 
 
-                    level.triggered=false;
+                const level={
+
+                    id: nextId++,
+                    symbol:data.symbol,
+                    price:Number(data.price),
+                    type:data.type,
+                    active:false
+
+                };
 
 
 
-                    LEVELS.push(
+                LEVELS.push(level);
+
+
+
+                console.log(
+                    "LEVEL ADDED",
+                    level
+                );
+
+
+
+                res.end(
+                    JSON.stringify({
+                        ok:true,
                         level
-                    );
-
-
-
-                    console.log(
-                        "NEW LEVEL:",
-                        level
-                    );
-
-
-
-                    res.end(
-                        JSON.stringify({
-                            ok:true,
-                            level
-                        })
-                    );
-
-
-                }catch(e){
-
-
-                    res.statusCode=400;
-
-
-                    res.end(
-                        JSON.stringify({
-                            ok:false,
-                            error:e.message
-                        })
-                    );
-
-                }
+                    })
+                );
 
 
             }
@@ -238,13 +247,28 @@ async (req,res)=>{
 
 
 
-    // Удалить все уровни
+
+
+    // DELETE LEVEL
+
     if(
-        req.method === "DELETE" &&
-        req.url === "/api/levels"
+        req.method==="DELETE" &&
+        url.pathname.startsWith("/api/levels/")
     ){
 
-        LEVELS=[];
+
+        const id =
+        Number(
+            url.pathname.split("/").pop()
+        );
+
+
+
+        LEVELS =
+        LEVELS.filter(
+            x=>x.id!==id
+        );
+
 
 
         res.end(
@@ -257,6 +281,86 @@ async (req,res)=>{
         return;
 
     }
+
+
+
+
+
+    // UPDATE LEVEL
+
+    if(
+        req.method==="PUT" &&
+        url.pathname.startsWith("/api/levels/")
+    ){
+
+
+        const id =
+        Number(
+            url.pathname.split("/").pop()
+        );
+
+
+
+        let body="";
+
+
+        req.on(
+            "data",
+            c=>body+=c
+        );
+
+
+        req.on(
+            "end",
+            ()=>{
+
+
+                const data =
+                JSON.parse(body);
+
+
+
+                const level =
+                LEVELS.find(
+                    x=>x.id===id
+                );
+
+
+
+                if(level){
+
+
+                    level.price =
+                    Number(data.price ?? level.price);
+
+
+                    level.type =
+                    data.type ?? level.type;
+
+
+                    level.active=false;
+
+
+                }
+
+
+
+                res.end(
+                    JSON.stringify({
+                        ok:true,
+                        level
+                    })
+                );
+
+
+            }
+        );
+
+
+        return;
+
+    }
+
 
 
 
@@ -285,54 +389,34 @@ process.env.PORT || 10000,
 
 
 
-// Binance WebSocket
-
-
-const url =
-`wss://fstream.binance.com/market/stream?streams=${SYMBOL}@aggTrade`;
-
-
-
-console.log(
-"Connecting Binance:",
-url
-);
-
 
 
 const ws =
-new WebSocket(url);
+new WebSocket(
+`wss://fstream.binance.com/market/stream?streams=${SYMBOL}@aggTrade`
+);
 
 
 
 ws.on(
 "open",
-()=>{
-
-    console.log(
-        "BINANCE CONNECTED"
-    );
-
-});
+()=>console.log("BINANCE CONNECTED")
+);
 
 
 
 ws.on(
 "message",
-(data)=>{
+data=>{
 
 
     const msg =
     JSON.parse(data);
 
 
-    const trade =
-    msg.data;
-
-
 
     const price =
-    Number(trade.p);
+    Number(msg.data.p);
 
 
 
@@ -340,6 +424,7 @@ ws.on(
         SYMBOL,
         price
     );
+
 
 
     checkLevels(price);
@@ -351,22 +436,8 @@ ws.on(
 
 ws.on(
 "error",
-(err)=>{
-
-    console.log(
-        "WS ERROR",
-        err.message
-    );
-
-});
-
-
-ws.on(
-"close",
-()=>{
-
-    console.log(
-        "WS CLOSED"
-    );
-
-});
+e=>console.log(
+"WS ERROR",
+e.message
+)
+);
