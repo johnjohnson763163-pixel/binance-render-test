@@ -1,8 +1,9 @@
 {
   "name": "binance-render-test",
   "version": "1.0.0",
+  "type": "module",
   "scripts": {
-    "start": "node render_binance_test.js"
+    "start": "node render_binance_monitor.js"
   },
   "dependencies": {
     "ws": "^8.18.0"
