@@ -4,106 +4,18 @@ import WebSocket from "ws";
 
 const SYMBOL = "solusdt";
 
-const LEVELS = [
-    {
-        symbol: "SOLUSDT",
-        price: 100,
-        type: "above",
-        triggered: false
-    }
-];
+
+// Теперь уровни будут приходить через API
+let LEVELS = [];
 
 
-// Render Environment Variables
+// Telegram
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT = process.env.TELEGRAM_CHAT;
 
 
 
-console.log(
-    "Telegram variables:",
-    {
-        token_exists: !!TELEGRAM_TOKEN,
-        chat_exists: !!TELEGRAM_CHAT
-    }
-);
-
-
-
-async function testTelegramConnection(){
-
-    try{
-
-        const r = await fetch(
-            "https://api.telegram.org"
-        );
-
-        console.log(
-            "Telegram connection status:",
-            r.status
-        );
-
-
-    }catch(e){
-
-        console.log(
-            "Telegram connection error:",
-            e.message
-        );
-
-    }
-
-}
-
-
-
-async function testTelegramBot(){
-
-    if(!TELEGRAM_TOKEN){
-
-        console.log(
-            "Telegram token missing"
-        );
-
-        return;
-    }
-
-
-    try{
-
-        const url =
-        `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getMe`;
-
-
-        const r = await fetch(url);
-
-
-        console.log(
-            "Telegram getMe status:",
-            r.status
-        );
-
-
-        console.log(
-            await r.text()
-        );
-
-
-    }catch(e){
-
-        console.log(
-            "Telegram getMe error:",
-            e.message
-        );
-
-    }
-
-}
-
-
-
 async function sendTelegram(text){
-
 
     console.log(
         "TELEGRAM MESSAGE:",
@@ -121,9 +33,7 @@ async function sendTelegram(text){
     }
 
 
-
     try{
-
 
         const url =
         `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
@@ -137,37 +47,30 @@ async function sendTelegram(text){
                     "Content-Type":"application/json"
                 },
                 body:JSON.stringify({
-
                     chat_id: TELEGRAM_CHAT,
                     text:text
-
                 })
             }
         );
 
 
         console.log(
-            "Telegram send status:",
+            "Telegram status:",
             r.status
-        );
-
-
-        console.log(
-            await r.text()
         );
 
 
     }catch(e){
 
         console.log(
-            "Telegram send error:",
+            "Telegram error:",
             e.message
         );
 
     }
 
-
 }
+
 
 
 
@@ -195,27 +98,175 @@ function checkLevels(price){
                 `SOLUSDT пробил уровень ${level.price}. Цена ${price}`
             );
 
+        }
+
+
+
+        if(
+            level.type === "below" &&
+            price <= level.price &&
+            !level.triggered
+        ){
+
+            level.triggered = true;
+
+
+            sendTelegram(
+                `SOLUSDT ниже уровня ${level.price}. Цена ${price}`
+            );
 
         }
 
 
     }
 
-
 }
 
 
 
 
+// HTTP API
+
 const server =
 http.createServer(
-(req,res)=>{
+async (req,res)=>{
 
-    res.writeHead(200);
+
+    res.setHeader(
+        "Content-Type",
+        "application/json"
+    );
+
+
+
+    // Получить уровни
+    if(
+        req.method === "GET" &&
+        req.url === "/api/levels"
+    ){
+
+        res.end(
+            JSON.stringify(
+                LEVELS
+            )
+        );
+
+        return;
+    }
+
+
+
+    // Добавить уровень
+    if(
+        req.method === "POST" &&
+        req.url === "/api/levels"
+    ){
+
+
+        let body="";
+
+
+        req.on(
+            "data",
+            chunk=>{
+                body += chunk;
+            }
+        );
+
+
+        req.on(
+            "end",
+            ()=>{
+
+
+                try{
+
+
+                    const level =
+                    JSON.parse(body);
+
+
+
+                    level.triggered=false;
+
+
+
+                    LEVELS.push(
+                        level
+                    );
+
+
+
+                    console.log(
+                        "NEW LEVEL:",
+                        level
+                    );
+
+
+
+                    res.end(
+                        JSON.stringify({
+                            ok:true,
+                            level
+                        })
+                    );
+
+
+                }catch(e){
+
+
+                    res.statusCode=400;
+
+
+                    res.end(
+                        JSON.stringify({
+                            ok:false,
+                            error:e.message
+                        })
+                    );
+
+                }
+
+
+            }
+        );
+
+
+        return;
+
+    }
+
+
+
+    // Удалить все уровни
+    if(
+        req.method === "DELETE" &&
+        req.url === "/api/levels"
+    ){
+
+        LEVELS=[];
+
+
+        res.end(
+            JSON.stringify({
+                ok:true
+            })
+        );
+
+
+        return;
+
+    }
+
+
 
     res.end(
-        "Render Binance Monitor OK"
+        JSON.stringify({
+            ok:true,
+            service:"Render Binance Monitor"
+        })
     );
+
 
 });
 
@@ -233,17 +284,13 @@ process.env.PORT || 10000,
 
 
 
-// Telegram diagnostics
-testTelegramConnection();
-testTelegramBot();
-
-
-
 
 // Binance WebSocket
 
+
 const url =
 `wss://fstream.binance.com/market/stream?streams=${SYMBOL}@aggTrade`;
+
 
 
 console.log(
@@ -283,6 +330,7 @@ ws.on(
     msg.data;
 
 
+
     const price =
     Number(trade.p);
 
@@ -292,7 +340,6 @@ ws.on(
         SYMBOL,
         price
     );
-
 
 
     checkLevels(price);
@@ -312,7 +359,6 @@ ws.on(
     );
 
 });
-
 
 
 ws.on(
