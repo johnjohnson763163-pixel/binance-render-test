@@ -8,7 +8,8 @@ const LEVELS = [
     {
         symbol: "SOLUSDT",
         price: 101.20,
-        type: "above"
+        type: "above",
+        triggered: false
     }
 ];
 
