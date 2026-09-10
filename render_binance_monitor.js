@@ -13,7 +13,7 @@ const SYMBOL = "solusdt";
 const LEVELS = [
     {
         symbol: "SOLUSDT",
-        price: 101.05,
+        price: 100.00,
         type: "above",
         triggered: false
     }
