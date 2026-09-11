@@ -15,7 +15,11 @@ console.log("SUPABASE CHECK:", {
     url: !!process.env.SUPABASE_URL,
     key: !!process.env.SUPABASE_SERVICE_KEY
 });
-console.log("TELEGRAM CONFIG:", { token: !!process.env.TELEGRAM_TOKEN, chat: !!process.env.TELEGRAM_CHAT });
+
+console.log("TELEGRAM CONFIG:", {
+    token: !!process.env.TELEGRAM_TOKEN,
+    chat: !!process.env.TELEGRAM_CHAT
+});
 
 // ===============================
 // TELEGRAM
@@ -48,7 +52,7 @@ async function sendTelegram(text) {
 
         const result = await response.json().catch(() => ({}));
 
-        console.log("TELEGRAM HTTP:", response.status, result.ok === true ? "OK" : (result.description || "FAILED"));
+        console.log("TELEGRAM HTTP:", response.status, response.statusText);
 
         if (!response.ok || result.ok === false) {
             console.log(
@@ -58,6 +62,7 @@ async function sendTelegram(text) {
             return false;
         }
 
+        console.log("TELEGRAM SENT OK");
         return true;
     } catch (e) {
         console.log("TELEGRAM ERROR:", e.message);
@@ -609,8 +614,6 @@ async function checkSignalLevels(symbol, price) {
             const alertId =
                 await getOrCreateLevelAlert(level);
 
-            console.log("SIGNAL EVENT: recording", { alertId, symbol: normalizedSymbol, level: levelPrice, telegramSent: sent });
-
             await recordAlertEvent({
                 alertId,
                 alertName: title,
@@ -916,18 +919,23 @@ function restartTickerWebSocket() {
         );
     });
 
-    ws.on("message", data => {
+    ws.on("message", async data => {
         try {
-            const msg = JSON.parse(data.toString());
+            const raw = data.toString();
+            const msg = JSON.parse(raw);
             const event = msg?.data;
 
-            if (!event) return;
+            if (!event) {
+                console.log("BINANCE TICKER MESSAGE WITHOUT DATA");
+                return;
+            }
 
             const symbol = normalizeSymbol(event.s);
-            if (!symbol) return;
+            const price = numeric(event.c);
+            if (!symbol || price === null) return;
 
             const row = {
-                price: numeric(event.c),
+                price,
                 priceChange24h: numeric(event.P),
                 turnover24h: numeric(event.q),
                 volume24h: numeric(event.v)
@@ -935,10 +943,22 @@ function restartTickerWebSocket() {
 
             tickerMarket.set(symbol, row);
 
-            if (Number.isFinite(row.price)) {
-                // Do not add ticker snapshots to price history.
-                // aggTrade is the authoritative realtime price stream.
-                // This avoids mixing two clocks into crossing logic.
+            // IMPORTANT: use the Futures ticker stream as a second
+            // realtime price source for signal-level crossing.
+            // This makes the monitor independent from aggTrade delivery.
+            rememberPrice(symbol, price, Date.now());
+
+            console.log("BINANCE TICKER PRICE:", symbol, price);
+
+            await checkSignalLevels(symbol, price);
+
+            for (const alert of activeAlerts) {
+                await evaluateAlert(
+                    alert,
+                    symbol,
+                    row,
+                    price
+                );
             }
         } catch (e) {
             console.log(
@@ -1016,10 +1036,12 @@ async function refreshAlerts() {
             [...symbols].sort().join(",");
 
         console.log(
-            "ALERTS:", alerts.length,
-            "LEVELS:", levels.length,
-            "LEVEL DETAILS:", levels.map(level => ({ id: level.id, symbol: normalizeSymbol(level.symbol), price: level.price, active: level.active, triggered: level.triggered })),
-            "SYMBOLS:", [...symbols].join(", ") || "dynamic"
+            "ALERTS:",
+            alerts.length,
+            "LEVELS:",
+            levels.length,
+            "SYMBOLS:",
+            [...symbols].join(", ") || "dynamic"
         );
 
         if (nextKey !== tradeSymbolsKey) {
