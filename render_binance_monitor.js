@@ -1,5 +1,9 @@
 import http from "http";
 import WebSocket from "ws";
+console.log("SUPABASE CHECK:", {
+    url: !!process.env.SUPABASE_URL,
+    key: !!process.env.SUPABASE_SERVICE_KEY
+});
 
 
 const SYMBOL = "solusdt";
