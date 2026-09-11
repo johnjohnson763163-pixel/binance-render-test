@@ -3,6 +3,10 @@ import WebSocket from "ws";
 import { createClient } from "@supabase/supabase-js";
 
 
+// ===============================
+// CONFIG
+// ===============================
+
 const SYMBOL = "solusdt";
 
 
@@ -22,14 +26,12 @@ console.log("SUPABASE CHECK:", {
 });
 
 
-
 // ===============================
 // TELEGRAM
 // ===============================
 
 const TELEGRAM_TOKEN =
 process.env.TELEGRAM_TOKEN;
-
 
 const TELEGRAM_CHAT =
 process.env.TELEGRAM_CHAT;
@@ -48,38 +50,32 @@ async function sendTelegram(text){
         return;
 
 
-    try{
-
-        await fetch(
-            `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-            {
-                method:"POST",
-                headers:{
-                    "Content-Type":"application/json"
-                },
-                body:JSON.stringify({
-                    chat_id:TELEGRAM_CHAT,
-                    text:text
-                })
-            }
-        );
+    const r = await fetch(
+        `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
+        {
+            method:"POST",
+            headers:{
+                "Content-Type":"application/json"
+            },
+            body:JSON.stringify({
+                chat_id:TELEGRAM_CHAT,
+                text:text
+            })
+        }
+    );
 
 
-    }catch(e){
-
-        console.log(
-            "Telegram error:",
-            e.message
-        );
-
-    }
+    console.log(
+        "Telegram status:",
+        r.status
+    );
 
 }
 
 
 
 // ===============================
-// LEVELS FROM DATABASE
+// DATABASE
 // ===============================
 
 async function getLevels(){
@@ -92,7 +88,7 @@ async function getLevels(){
     if(error){
 
         console.log(
-            "SUPABASE READ ERROR:",
+            "SUPABASE ERROR:",
             error.message
         );
 
@@ -107,19 +103,20 @@ async function getLevels(){
 
 
 
+
 // ===============================
-// CHECK PRICE
+// LEVEL CHECK
 // ===============================
 
 async function checkLevels(price){
 
 
-    const LEVELS =
+    const levels =
     await getLevels();
 
 
 
-    for(const level of LEVELS){
+    for(const level of levels){
 
 
         if(level.symbol !== "SOLUSDT")
@@ -127,71 +124,64 @@ async function checkLevels(price){
 
 
 
-        if(level.type==="above"){
+        if(
+            level.type==="above" &&
+            price >= Number(level.price) &&
+            level.active
+        ){
 
 
-            if(
-                price >= Number(level.price) &&
-                level.active
-            ){
+            await sendTelegram(
+                `${level.symbol} пробил уровень ${level.price}. Цена ${price}`
+            );
 
 
-                await sendTelegram(
-                    `${level.symbol} пробил уровень ${level.price}. Цена ${price}`
-                );
+            await supabase
+            .from("levels")
+            .update({
+                active:false
+            })
+            .eq(
+                "id",
+                level.id
+            );
 
-
-                await supabase
-                .from("levels")
-                .update({
-                    active:false
-                })
-                .eq(
-                    "id",
-                    level.id
-                );
-
-
-            }
 
         }
 
 
 
-
-        if(level.type==="below"){
-
-
-            if(
-                price <= Number(level.price) &&
-                level.active
-            ){
+        if(
+            level.type==="below" &&
+            price <= Number(level.price) &&
+            level.active
+        ){
 
 
-                await sendTelegram(
-                    `${level.symbol} ниже уровня ${level.price}. Цена ${price}`
-                );
+            await sendTelegram(
+                `${level.symbol} ниже уровня ${level.price}. Цена ${price}`
+            );
 
 
-                await supabase
-                .from("levels")
-                .update({
-                    active:false
-                })
-                .eq(
-                    "id",
-                    level.id
-                );
-
-
-            }
+            await supabase
+            .from("levels")
+            .update({
+                active:false
+            })
+            .eq(
+                "id",
+                level.id
+            );
 
         }
 
 
     }
 
+
 }
+
+
 
 
 
@@ -226,13 +216,71 @@ async(req,res)=>{
         url.pathname==="/api/levels"
     ){
 
-
-        const levels =
-        await getLevels();
-
-
         res.end(
-            JSON.stringify(levels)
+            JSON.stringify(
+                await getLevels()
+            )
+        );
+
+        return;
+    }
+
+
+
+
+    // CREATE LEVEL
+
+    if(
+        req.method==="POST" &&
+        url.pathname==="/api/levels"
+    ){
+
+        let body="";
+
+
+        req.on(
+            "data",
+            c=>body+=c
+        );
+
+
+        req.on(
+            "end",
+            async()=>{
+
+
+                const d =
+                JSON.parse(body);
+
+
+
+                const {data,error}=
+
+                await supabase
+                .from("levels")
+                .insert({
+
+                    symbol:d.symbol.toUpperCase(),
+                    price:Number(d.price),
+                    type:d.type,
+                    active:true
+
+                })
+                .select()
+                .single();
+
+
+
+                res.end(
+                    JSON.stringify({
+                        ok:!error,
+                        level:data,
+                        error:error?.message
+                    })
+                );
+
+
+            }
         );
 
 
@@ -244,12 +292,17 @@ async(req,res)=>{
 
 
 
-    // ADD LEVEL
+    // UPDATE LEVEL
 
     if(
-        req.method==="POST" &&
-        url.pathname==="/api/levels"
+        req.method==="PUT" &&
+        url.pathname.startsWith("/api/levels/")
     ){
+
+        const id =
+        Number(
+            url.pathname.split("/").pop()
+        );
 
 
         let body="";
@@ -266,58 +319,36 @@ async(req,res)=>{
             async()=>{
 
 
-                const data =
+                const d =
                 JSON.parse(body);
 
 
 
-                const level={
-
-                    symbol:data.symbol,
-                    price:Number(data.price),
-                    type:data.type,
-                    active:true
-
-                };
-
-
-
-                const {data:created,error}=
+                const {data,error}=
 
                 await supabase
                 .from("levels")
-                .insert(level)
+                .update({
+
+                    price:Number(d.price),
+                    type:d.type,
+                    active:true
+
+                })
+                .eq(
+                    "id",
+                    id
+                )
                 .select()
                 .single();
 
 
 
-                if(error){
-
-                    res.end(
-                        JSON.stringify({
-                            ok:false,
-                            error:error.message
-                        })
-                    );
-
-                    return;
-
-                }
-
-
-
-                console.log(
-                    "LEVEL ADDED",
-                    created
-                );
-
-
-
                 res.end(
                     JSON.stringify({
-                        ok:true,
-                        level:created
+                        ok:!error,
+                        level:data,
+                        error:error?.message
                     })
                 );
 
@@ -348,7 +379,6 @@ async(req,res)=>{
         );
 
 
-
         await supabase
         .from("levels")
         .delete()
@@ -356,7 +386,6 @@ async(req,res)=>{
             "id",
             id
         );
-
 
 
         res.end(
@@ -372,10 +401,12 @@ async(req,res)=>{
 
 
 
+
+
     res.end(
         JSON.stringify({
             ok:true,
-            service:"Render Binance Monitor + Supabase"
+            service:"Binance Monitor API"
         })
     );
 
@@ -386,19 +417,15 @@ async(req,res)=>{
 
 server.listen(
 process.env.PORT || 10000,
-()=>{
-
-console.log(
-"HTTP server started"
+()=>console.log("HTTP server started")
 );
 
-});
 
 
 
 
 // ===============================
-// BINANCE WS
+// BINANCE
 // ===============================
 
 const ws =
@@ -410,19 +437,14 @@ new WebSocket(
 
 ws.on(
 "open",
-()=>{
-
-console.log(
-"BINANCE CONNECTED"
+()=>console.log("BINANCE CONNECTED")
 );
-
-});
 
 
 
 ws.on(
 "message",
-async(data)=>{
+async data=>{
 
 
     const msg =
@@ -441,18 +463,7 @@ async(data)=>{
     );
 
 
-
     await checkLevels(price);
 
 
 });
-
-
-
-ws.on(
-"error",
-e=>console.log(
-"WS ERROR",
-e.message
-)
-);
