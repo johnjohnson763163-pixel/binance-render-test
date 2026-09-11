@@ -1136,6 +1136,155 @@ const server = http.createServer(
             return;
         }
 
+        // POST SIGNAL LEVEL SYNC
+        // The Screener sends the complete current set of chart signal levels.
+        // Render writes that exact set to Supabase and therefore monitors only
+        // the symbols that currently have a signal level in the Screener.
+        if (
+            req.method === "POST" &&
+            url.pathname === "/api/signal-levels/sync"
+        ) {
+
+            let body = "";
+
+            req.on("data", chunk => {
+                body += chunk;
+                if (body.length > 2_000_000) req.destroy();
+            });
+
+            req.on("end", async () => {
+                try {
+                    const data = JSON.parse(body || "{}");
+                    if (!Array.isArray(data.levels)) {
+                        throw new Error("levels must be an array");
+                    }
+
+                    const incoming = [];
+                    const seen = new Set();
+
+                    for (const item of data.levels) {
+                        const symbol = normalizeSymbol(item?.symbol);
+                        const price = numeric(item?.price);
+                        if (!symbol || price === null || price <= 0) continue;
+
+                        const key = `${symbol}:${price}`;
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        incoming.push({
+                            symbol,
+                            price,
+                            active: item?.active !== false
+                        });
+                    }
+
+                    // First deactivate everything currently stored. This is
+                    // deliberate: the request represents the complete current
+                    // Screener state, so removed chart levels must stop being
+                    // monitored immediately.
+                    const { error: deactivateError } = await supabase
+                        .from("levels")
+                        .update({
+                            active: false,
+                            triggered: false,
+                            updated_at: nowIso()
+                        })
+                        .eq("active", true);
+
+                    if (deactivateError) {
+                        throw new Error(`Supabase level deactivate: ${deactivateError.message}`);
+                    }
+
+                    // Reactivate/update matching levels, or create them if they
+                    // do not exist yet. Matching is by symbol + price because
+                    // the browser drawing id is not the numeric Supabase id.
+                    const { data: existingRows, error: readError } = await supabase
+                        .from("levels")
+                        .select("*");
+
+                    if (readError) {
+                        throw new Error(`Supabase level read: ${readError.message}`);
+                    }
+
+                    const existingByKey = new Map();
+                    for (const row of existingRows || []) {
+                        const key = `${normalizeSymbol(row.symbol)}:${numeric(row.price)}`;
+                        if (!existingByKey.has(key)) existingByKey.set(key, row);
+                    }
+
+                    let synced = 0;
+                    for (const level of incoming) {
+                        const key = `${level.symbol}:${level.price}`;
+                        const existing = existingByKey.get(key);
+
+                        if (existing?.id) {
+                            const { error } = await supabase
+                                .from("levels")
+                                .update({
+                                    symbol: level.symbol,
+                                    price: level.price,
+                                    type: "signal",
+                                    active: level.active,
+                                    triggered: false,
+                                    alert_name: "Сигнальный уровень",
+                                    alert_type: "level",
+                                    condition: "cross",
+                                    updated_at: nowIso()
+                                })
+                                .eq("id", existing.id);
+
+                            if (error) throw new Error(`Supabase level update: ${error.message}`);
+                        } else {
+                            const { error } = await supabase
+                                .from("levels")
+                                .insert({
+                                    symbol: level.symbol,
+                                    price: level.price,
+                                    type: "signal",
+                                    active: level.active,
+                                    exchange: "Binance",
+                                    market: "Futures",
+                                    instrument: "B-F",
+                                    alert_name: "Сигнальный уровень",
+                                    alert_type: "level",
+                                    condition: "cross",
+                                    triggered: false,
+                                    cooldown_seconds: 60,
+                                    updated_at: nowIso()
+                                });
+
+                            if (error) throw new Error(`Supabase level insert: ${error.message}`);
+                        }
+
+                        if (level.active) synced += 1;
+                    }
+
+                    console.log(
+                        "SIGNAL LEVEL SYNC:",
+                        incoming.map(x => `${x.symbol}@${x.price}`).join(", ") || "none"
+                    );
+
+                    // Force the monitor to rebuild its Binance subscriptions from
+                    // the freshly synchronized Supabase state.
+                    await refreshAlerts();
+
+                    res.end(JSON.stringify({
+                        ok: true,
+                        levels: synced,
+                        symbols: [...new Set(incoming.filter(x => x.active).map(x => x.symbol))]
+                    }));
+                } catch (error) {
+                    console.log("SIGNAL LEVEL SYNC ERROR:", error.message);
+                    res.statusCode = 500;
+                    res.end(JSON.stringify({
+                        ok: false,
+                        error: error.message
+                    }));
+                }
+            });
+
+            return;
+        }
+
         // POST FULL ALERT SYNC
         if (
             req.method === "POST" &&
