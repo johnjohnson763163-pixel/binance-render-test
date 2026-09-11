@@ -1,29 +1,20 @@
-import http from "http";
-import WebSocket from "ws";
-import { createClient } from "@supabase/supabase-js";
+import http from “http”; import WebSocket from “ws”; import {
+createClient } from “@supabase/supabase-js”;
 
+// =============================== // SUPABASE //
+===============================
 
-// ===============================
-// SUPABASE
-// ===============================
+const supabase = createClient( process.env.SUPABASE_URL,
+process.env.SUPABASE_SERVICE_KEY );
 
-const supabase = createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_KEY
-);
+console.log(“SUPABASE CHECK:”, { url: !!process.env.SUPABASE_URL, key:
+!!process.env.SUPABASE_SERVICE_KEY });
 
-console.log("SUPABASE CHECK:", {
-    url: !!process.env.SUPABASE_URL,
-    key: !!process.env.SUPABASE_SERVICE_KEY
-});
+// =============================== // TELEGRAM //
+===============================
 
-
-// ===============================
-// TELEGRAM
-// ===============================
-
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const TELEGRAM_CHAT = process.env.TELEGRAM_CHAT;
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN; const TELEGRAM_CHAT =
+process.env.TELEGRAM_CHAT;
 
 async function sendTelegram(text) {
 
@@ -62,145 +53,357 @@ async function sendTelegram(text) {
         console.log("Telegram error:", e.message);
         return false;
     }
+
 }
 
+// =============================== // ALERT STATE //
+===============================
 
-// ===============================
-// LEVEL STATE
-// ===============================
+let activeAlerts = []; let monitoredSymbols = new Set(); let websocket =
+null; let websocketSymbolsKey = ““; const priceHistory = new Map();
+const PRICE_HISTORY_MS = 65 * 60 * 1000; const MARKET_REFRESH_MS = 5000;
+let marketRefreshRunning = false;
 
-let activeLevels = [];
-let monitoredSymbols = new Set();
-let websocket = null;
-let websocketSymbolsKey = "";
+// =============================== // HELPERS //
+===============================
 
+function normalizeSymbol(value) { return String(value ||
+““).trim().toUpperCase(); }
 
-// ===============================
-// GET LEVELS FROM SUPABASE
-// ===============================
+function nowIso() { return new Date().toISOString(); }
 
-async function getLevels() {
+function numeric(value) { const n = Number(value); return
+Number.isFinite(n) ? n : null; }
 
-    const { data, error } = await supabase
-        .from("levels")
-        .select("*")
-        .eq("triggered", false)
-        .eq("active", true);
+function getNestedItems(node) { return Array.isArray(node?.items) ?
+node.items : []; }
+
+function evaluateOperator(left, operator, right) { switch (operator) {
+case “>”: return left > right; case “>=”: return left >= right; case
+“<”: return left < right; case “<=”: return left <= right; case “=”:
+case “==”: return left === right; case “!=”: return left !== right;
+default: return false; } }
+
+function previousPrice(symbol, windowMs) { const history =
+priceHistory.get(symbol) || []; const cutoff = Date.now() - windowMs;
+
+    for (let i = history.length - 1; i >= 0; i--) {
+        if (history[i].time <= cutoff) {
+            return history[i].price;
+        }
+    }
+
+    return null;
+
+}
+
+function rememberPrice(symbol, price) { const history =
+priceHistory.get(symbol) || []; const now = Date.now();
+
+    history.push({ time: now, price });
+
+    const cutoff = now - PRICE_HISTORY_MS;
+    while (history.length && history[0].time < cutoff) {
+        history.shift();
+    }
+
+    priceHistory.set(symbol, history);
+
+}
+
+function crossesLevel(symbol, price, levelPrice) { const history =
+priceHistory.get(symbol) || []; if (!history.length) return false;
+
+    const previous = history[history.length - 1].price;
+
+    return (
+        (previous < levelPrice && price >= levelPrice) ||
+        (previous > levelPrice && price <= levelPrice)
+    );
+
+}
+
+// =============================== // SUPABASE ALERTS //
+===============================
+
+async function getAlerts() { const { data, error } = await supabase
+.from(“alerts”) .select(“*“) .eq(”active”, true);
 
     if (error) {
-        console.log("SUPABASE READ ERROR:", error.message);
+        console.log("SUPABASE ALERT READ ERROR:", error.message);
         return [];
     }
 
     return data || [];
+
 }
 
+async function refreshAlerts() { const alerts = await getAlerts();
 
-// ===============================
-// REFRESH LEVELS
-// ===============================
-
-async function refreshLevels() {
-
-    const levels = await getLevels();
-
-    activeLevels = levels;
+    activeAlerts = alerts;
 
     const symbols = new Set();
 
-    for (const level of levels) {
-        const symbol = String(level.symbol || "").trim().toUpperCase();
+    for (const alert of alerts) {
+        const symbol = normalizeSymbol(alert.symbol);
 
+        // A global alert may omit symbol. In that case it is evaluated
+        // against every market symbol supplied by Binance 24h data.
         if (symbol) {
             symbols.add(symbol);
         }
     }
 
     const nextSymbolsKey = [...symbols].sort().join(",");
-
     monitoredSymbols = symbols;
 
     console.log(
-        "LEVELS:",
-        levels.length,
+        "ALERTS:",
+        alerts.length,
         "SYMBOLS:",
-        [...symbols].join(", ") || "none"
+        [...symbols].join(", ") || "dynamic"
     );
 
     if (nextSymbolsKey !== websocketSymbolsKey) {
         websocketSymbolsKey = nextSymbolsKey;
         restartBinanceWebSocket();
     }
+
 }
 
+// =============================== // CONDITION EVALUATION //
+===============================
 
-// ===============================
-// TIME FORMAT
-// ===============================
+async function fetch24hMarketData() { if (marketRefreshRunning) return;
+marketRefreshRunning = true;
 
-function localTime() {
+    try {
+        const response = await fetch(
+            "https://fapi.binance.com/fapi/v1/ticker/24hr"
+        );
 
-    return new Date().toLocaleString(
-        "ru-RU",
-        {
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit"
+        if (!response.ok) {
+            console.log(
+                "BINANCE 24H ERROR:",
+                response.status,
+                response.statusText
+            );
+            return;
         }
-    );
+
+        const rows = await response.json();
+
+        if (!Array.isArray(rows)) return;
+
+        const market = new Map();
+
+        for (const row of rows) {
+            const symbol = normalizeSymbol(row.symbol);
+            if (!symbol) continue;
+
+            market.set(symbol, {
+                price: numeric(row.lastPrice),
+                priceChange24h: numeric(row.priceChangePercent),
+                turnover24h: numeric(row.quoteVolume),
+                volume24h: numeric(row.volume)
+            });
+        }
+
+        // Keep a lightweight rolling price history for all symbols so
+        // price-change conditions can work even when an alert has no fixed symbol.
+        for (const [symbol, row] of market.entries()) {
+            if (Number.isFinite(row.price)) {
+                rememberPrice(symbol, row.price);
+            }
+        }
+
+        for (const alert of activeAlerts) {
+            await evaluateAlert(alert, market);
+        }
+
+    } catch (e) {
+        console.log("BINANCE 24H FETCH ERROR:", e.message);
+    } finally {
+        marketRefreshRunning = false;
+    }
+
 }
 
+function evaluateCondition(condition, symbol, marketRow, currentPrice) {
+if (!condition || typeof condition !== “object”) { return false; }
 
-// ===============================
-// CHECK ALERTS
-// ===============================
+    const metric = String(condition.metric || "").toLowerCase();
+    const operator = String(condition.operator || "").trim();
+    const target = numeric(condition.value);
 
-async function checkLevels(symbol, price) {
+    if (metric === "price_cross") {
+        const level = target;
+        if (level === null) return false;
+        return crossesLevel(symbol, currentPrice, level);
+    }
 
-    const normalizedSymbol = String(symbol || "").toUpperCase();
+    if (target === null) return false;
 
-    // Work only with levels that came from Supabase.
-    const levels = activeLevels.filter(
-        level =>
-            String(level.symbol || "").toUpperCase() === normalizedSymbol &&
-            level.active !== false &&
-            level.triggered !== true
+    if (metric === "price") {
+        return evaluateOperator(currentPrice, operator, target);
+    }
+
+    if (metric === "price_change") {
+        const timeframe = String(condition.timeframe || "1h").toLowerCase();
+
+        let windowMs = 60 * 60 * 1000;
+        if (timeframe === "5m") windowMs = 5 * 60 * 1000;
+        if (timeframe === "15m") windowMs = 15 * 60 * 1000;
+        if (timeframe === "30m") windowMs = 30 * 60 * 1000;
+        if (timeframe === "1h") windowMs = 60 * 60 * 1000;
+        if (timeframe === "4h") windowMs = 4 * 60 * 60 * 1000;
+        if (timeframe === "24h") windowMs = 24 * 60 * 60 * 1000;
+
+        const previous = previousPrice(symbol, windowMs);
+        if (previous === null || previous === 0) return false;
+
+        const changePct = ((currentPrice - previous) / previous) * 100;
+        return evaluateOperator(changePct, operator, target);
+    }
+
+    if (!marketRow) return false;
+
+    if (metric === "turnover_24h") {
+        return evaluateOperator(marketRow.turnover24h, operator, target);
+    }
+
+    if (metric === "volume_24h") {
+        return evaluateOperator(marketRow.volume24h, operator, target);
+    }
+
+    if (metric === "price_change_24h") {
+        return evaluateOperator(
+            marketRow.priceChange24h,
+            operator,
+            target
+        );
+    }
+
+    return false;
+
+}
+
+function evaluateConditionTree(node, symbol, marketRow, currentPrice) {
+// A plain array is a convenient shorthand for AND. if
+(Array.isArray(node)) { if (!node.length) return false;
+
+        return node.every(item =>
+            evaluateConditionTree(
+                item,
+                symbol,
+                marketRow,
+                currentPrice
+            )
+        );
+    }
+
+    if (!node || typeof node !== "object") {
+        return false;
+    }
+
+    // A leaf condition.
+    if (node.metric) {
+        return evaluateCondition(
+            node,
+            symbol,
+            marketRow,
+            currentPrice
+        );
+    }
+
+    const logic = String(node.logic || "AND").toUpperCase();
+    const items = getNestedItems(node);
+
+    if (!items.length) return false;
+
+    if (logic === "OR") {
+        return items.some(item =>
+            evaluateConditionTree(
+                item,
+                symbol,
+                marketRow,
+                currentPrice
+            )
+        );
+    }
+
+    return items.every(item =>
+        evaluateConditionTree(
+            item,
+            symbol,
+            marketRow,
+            currentPrice
+        )
     );
 
-    for (const level of levels) {
+}
 
-        const levelPrice = Number(level.price);
+function formatConditionForMessage(condition, parts = []) { if
+(!condition || typeof condition !== “object”) return parts;
 
-        if (!Number.isFinite(levelPrice)) {
-            continue;
+    if (condition.metric) {
+        const metric = String(condition.metric);
+        const operator = String(condition.operator || "crosses");
+        const value = condition.value;
+
+        if (metric === "price_cross") {
+            parts.push(`Цена пересекла ${value}`);
+        } else if (metric === "price_change") {
+            parts.push(
+                `Изменение ${condition.timeframe || "1h"} ${operator} ${value}%`
+            );
+        } else if (metric === "turnover_24h") {
+            parts.push(`Оборот 24h ${operator} ${value}`);
+        } else if (metric === "volume_24h") {
+            parts.push(`Объём 24h ${operator} ${value}`);
+        } else if (metric === "price_change_24h") {
+            parts.push(`Изменение 24h ${operator} ${value}%`);
+        } else {
+            parts.push(`${metric} ${operator} ${value}`);
         }
 
-        let hit = false;
+        return parts;
+    }
 
-        if (level.condition === "above" && price >= levelPrice) {
-            hit = true;
-        }
+    const logic = String(condition.logic || "AND").toUpperCase();
 
-        if (level.condition === "below" && price <= levelPrice) {
-            hit = true;
-        }
+    for (const item of getNestedItems(condition)) {
+        formatConditionForMessage(item, parts);
+    }
 
-        if (!hit) {
-            continue;
-        }
+    return parts;
 
+}
 
-        // ===============================
-        // COOLDOWN
-        // ===============================
+async function evaluateAlert(alert, market) { const alertSymbol =
+normalizeSymbol(alert.symbol); const symbols = alertSymbol ?
+[alertSymbol] : […market.keys()];
+
+    for (const symbol of symbols) {
+        const row = market.get(symbol);
+        if (!row || !Number.isFinite(row.price)) continue;
+
+        const hit = evaluateConditionTree(
+            alert.conditions,
+            symbol,
+            row,
+            row.price
+        );
+
+        if (!hit) continue;
 
         const cooldown =
-            Number(level.cooldown_seconds || 60) * 1000;
+            Number(alert.cooldown_seconds || 60) * 1000;
 
-        if (level.last_trigger_time) {
-
-            const last =
-                new Date(level.last_trigger_time).getTime();
+        if (alert.last_trigger_time) {
+            const last = new Date(
+                alert.last_trigger_time
+            ).getTime();
 
             if (
                 Number.isFinite(last) &&
@@ -210,86 +413,86 @@ async function checkLevels(symbol, price) {
             }
         }
 
-
-        // ===============================
-        // TELEGRAM MESSAGE
-        // ===============================
-
         const title =
-            level.alert_name ||
-            "Сигнальный уровень";
+            alert.alert_name ||
+            alert.name ||
+            "Алерт";
 
         const instrument =
-            level.instrument ||
+            alert.instrument ||
             "B-F";
 
+        const conditionText =
+            formatConditionForMessage(
+                alert.conditions,
+                []
+            ).join(
+                String(alert.conditions?.logic || "AND")
+                    .toUpperCase() === "OR"
+                    ? " ИЛИ "
+                    : " И "
+            );
+
         const message =
-`🔔 ${title} · ${normalizedSymbol} · ${instrument}
 
-Цена: ${price}
+`🔔 ${title} · ${symbol} · ${instrument}
 
-Уровень: ${levelPrice}
+Цена: ${row.price}
+
+Условие: ${conditionText || “условия выполнены”}
 
 Время: ${localTime()}`;
 
-
         const sent = await sendTelegram(message);
 
-        if (!sent) {
-            continue;
-        }
+        if (!sent) continue;
 
-
-        // ===============================
-        // SAVE TRIGGER STATE
-        // ===============================
-
-        const nowIso = new Date().toISOString();
+        const triggeredAt = nowIso();
 
         const { error } = await supabase
-            .from("levels")
+            .from("alerts")
             .update({
-                last_trigger_price: price,
-                last_trigger_time: nowIso,
-                updated_at: nowIso
+                last_trigger_price: row.price,
+                last_trigger_time: triggeredAt,
+                updated_at: triggeredAt
             })
-            .eq("id", level.id);
+            .eq("id", alert.id);
 
         if (error) {
             console.log(
-                "SUPABASE UPDATE ERROR:",
+                "SUPABASE ALERT UPDATE ERROR:",
                 error.message
             );
-        } else {
-            // Update local state immediately so the next Binance ticks
-            // cannot resend the same level during the cooldown.
-            level.last_trigger_price = price;
-            level.last_trigger_time = nowIso;
-            level.updated_at = nowIso;
         }
+
+        alert.last_trigger_price = row.price;
+        alert.last_trigger_time = triggeredAt;
+        alert.updated_at = triggeredAt;
+
+        console.log(
+            "ALERT TRIGGERED:",
+            alert.id,
+            symbol,
+            row.price
+        );
     }
+
 }
 
+// =============================== // BINANCE WEBSOCKET //
+===============================
 
-// ===============================
-// BINANCE WEBSOCKET
-// ===============================
-
-function restartBinanceWebSocket() {
-
-    if (websocket) {
-        try {
-            websocket.removeAllListeners();
-            websocket.close();
-        } catch (e) {
-            console.log("WS CLOSE ERROR:", e.message);
-        }
+function restartBinanceWebSocket() { if (websocket) { try {
+websocket.removeAllListeners(); websocket.close(); } catch (e) {
+console.log(“WS CLOSE ERROR:”, e.message); }
 
         websocket = null;
     }
 
     if (!monitoredSymbols.size) {
-        console.log("BINANCE: no active levels, websocket not started");
+        console.log(
+            "BINANCE: no fixed symbols, websocket not started"
+        );
         return;
     }
 
@@ -319,42 +522,26 @@ function restartBinanceWebSocket() {
     ws.on(
         "message",
         async data => {
-
             try {
-
                 const msg = JSON.parse(data.toString());
 
-                if (!msg || !msg.data) {
-                    return;
-                }
+                if (!msg || !msg.data) return;
 
                 const symbol =
-                    String(msg.data.s || "").toUpperCase();
+                    normalizeSymbol(msg.data.s);
 
                 const price =
-                    Number(msg.data.p);
+                    numeric(msg.data.p);
 
-                if (!symbol || !Number.isFinite(price)) {
-                    return;
-                }
+                if (!symbol || price === null) return;
 
-                console.log(
-                    symbol,
-                    price
-                );
-
-                await checkLevels(
-                    symbol,
-                    price
-                );
+                rememberPrice(symbol, price);
 
             } catch (e) {
-
                 console.log(
                     "BINANCE MESSAGE ERROR:",
                     e.message
                 );
-
             }
         }
     );
@@ -372,283 +559,272 @@ function restartBinanceWebSocket() {
     ws.on(
         "close",
         () => {
-
             console.log("BINANCE DISCONNECTED");
 
             if (websocket === ws) {
                 websocket = null;
             }
 
-            // Reconnect only if active levels still exist.
             setTimeout(
                 () => {
-
                     if (
                         monitoredSymbols.size &&
                         websocket === null
                     ) {
                         restartBinanceWebSocket();
                     }
-
                 },
                 3000
             );
         }
     );
+
 }
 
+// =============================== // LOCAL TIME //
+===============================
 
-// ===============================
-// HTTP SERVER
-// ===============================
+function localTime() { return new Date().toLocaleString( “ru-RU”, {
+hour: “2-digit”, minute: “2-digit”, second: “2-digit” } ); }
 
-const server =
-http.createServer(
-    async (req, res) => {
+// =============================== // HTTP SERVER //
+===============================
 
-        res.setHeader(
-            "Content-Type",
-            "application/json; charset=utf-8"
-        );
+const server = http.createServer( async (req, res) => {
 
-
-        const url =
-            new URL(
-                req.url,
-                "http://localhost"
+            res.setHeader(
+                "Content-Type",
+                "application/json; charset=utf-8"
             );
 
+            const url =
+                new URL(
+                    req.url,
+                    "http://localhost"
+                );
 
-        // ===============================
-        // GET LEVELS
-        // ===============================
+            // ===============================
+            // GET ALERTS
+            // ===============================
 
-        if (
-            req.method === "GET" &&
-            url.pathname === "/api/levels"
-        ) {
+            if (
+                req.method === "GET" &&
+                url.pathname === "/api/alerts"
+            ) {
+                const alerts = await getAlerts();
 
-            const levels = await getLevels();
+                res.end(
+                    JSON.stringify(alerts)
+                );
 
-            res.end(
-                JSON.stringify(levels)
-            );
+                return;
+            }
 
-            return;
-        }
+            // ===============================
+            // POST ALERT
+            // ===============================
 
+            if (
+                req.method === "POST" &&
+                url.pathname === "/api/alerts"
+            ) {
+                let body = "";
 
-        // ===============================
-        // POST LEVEL
-        // ===============================
+                req.on(
+                    "data",
+                    chunk => {
+                        body += chunk;
+                    }
+                );
 
-        if (
-            req.method === "POST" &&
-            url.pathname === "/api/levels"
-        ) {
+                req.on(
+                    "end",
+                    async () => {
+                        let data;
 
-            let body = "";
+                        try {
+                            data = JSON.parse(body);
+                        } catch (e) {
+                            res.statusCode = 400;
 
-            req.on(
-                "data",
-                chunk => {
-                    body += chunk;
-                }
-            );
+                            res.end(
+                                JSON.stringify({
+                                    ok: false,
+                                    error: "Invalid JSON"
+                                })
+                            );
 
-            req.on(
-                "end",
-                async () => {
+                            return;
+                        }
 
-                    let data;
+                        if (
+                            !data ||
+                            typeof data !== "object" ||
+                            Array.isArray(data)
+                        ) {
+                            res.statusCode = 400;
 
-                    try {
+                            res.end(
+                                JSON.stringify({
+                                    ok: false,
+                                    error: "Invalid JSON object"
+                                })
+                            );
 
-                        data = JSON.parse(body);
+                            return;
+                        }
 
-                    } catch (e) {
+                        if (
+                            !data.conditions ||
+                            typeof data.conditions !== "object"
+                        ) {
+                            res.statusCode = 400;
+
+                            res.end(
+                                JSON.stringify({
+                                    ok: false,
+                                    error: "conditions are required"
+                                })
+                            );
+
+                            return;
+                        }
+
+                        const alert = {
+                            name:
+                                String(
+                                    data.name ||
+                                    data.alert_name ||
+                                    "Алерт"
+                                ).trim(),
+
+                            alert_name:
+                                String(
+                                    data.alert_name ||
+                                    data.name ||
+                                    "Алерт"
+                                ).trim(),
+
+                            symbol:
+                                normalizeSymbol(data.symbol),
+
+                            exchange:
+                                data.exchange ||
+                                "Binance",
+
+                            market:
+                                data.market ||
+                                "Futures",
+
+                            instrument:
+                                data.instrument ||
+                                "B-F",
+
+                            active: true,
+
+                            conditions:
+                                data.conditions,
+
+                            cooldown_seconds:
+                                Number(
+                                    data.cooldown_seconds || 60
+                                ),
+
+                            last_trigger_price: null,
+                            last_trigger_time: null
+                        };
+
+                        if (
+                            !Number.isFinite(
+                                alert.cooldown_seconds
+                            ) ||
+                            alert.cooldown_seconds < 0
+                        ) {
+                            res.statusCode = 400;
+
+                            res.end(
+                                JSON.stringify({
+                                    ok: false,
+                                    error: "Invalid cooldown_seconds"
+                                })
+                            );
+
+                            return;
+                        }
+
+                        const {
+                            data: created,
+                            error
+                        } = await supabase
+                            .from("alerts")
+                            .insert(alert)
+                            .select()
+                            .single();
+
+                        if (error) {
+                            res.statusCode = 500;
+
+                            res.end(
+                                JSON.stringify({
+                                    ok: false,
+                                    error: error.message
+                                })
+                            );
+
+                            return;
+                        }
 
                         console.log(
-                            "JSON ERROR:",
-                            e.message
+                            "ALERT CREATED:",
+                            created.id
                         );
 
-                        res.statusCode = 400;
+                        await refreshAlerts();
 
                         res.end(
                             JSON.stringify({
-                                ok: false,
-                                error: "Invalid JSON"
+                                ok: true,
+                                alert: created
                             })
                         );
-
-                        return;
                     }
+                );
 
+                return;
+            }
 
-                    if (
-                        !data ||
-                        typeof data !== "object" ||
-                        Array.isArray(data)
-                    ) {
-
-                        res.statusCode = 400;
-
-                        res.end(
-                            JSON.stringify({
-                                ok: false,
-                                error: "Invalid JSON object"
-                            })
-                        );
-
-                        return;
-                    }
-
-
-                    const symbol =
-                        String(data.symbol || "")
-                            .trim()
-                            .toUpperCase();
-
-                    const price =
-                        Number(data.price);
-
-                    if (
-                        !symbol ||
-                        !Number.isFinite(price)
-                    ) {
-
-                        res.statusCode = 400;
-
-                        res.end(
-                            JSON.stringify({
-                                ok: false,
-                                error: "Invalid symbol or price"
-                            })
-                        );
-
-                        return;
-                    }
-
-
-                    const level = {
-
-                        symbol,
-
-                        price,
-
-                        type: data.type,
-
-                        condition:
-                            data.condition ||
-                            data.type,
-
-                        active: true,
-
-                        alert_name:
-                            data.alert_name ||
-                            "Сигнальный уровень",
-
-                        exchange:
-                            data.exchange ||
-                            "Binance",
-
-                        market:
-                            data.market ||
-                            "Futures",
-
-                        instrument:
-                            data.instrument ||
-                            "B-F",
-
-                        alert_type:
-                            data.alert_type ||
-                            "level",
-
-                        triggered: false
-
-                    };
-
-
-                    const {
-                        data: created,
-                        error
-                    } = await supabase
-                        .from("levels")
-                        .insert(level)
-                        .select()
-                        .single();
-
-
-                    if (error) {
-
-                        res.statusCode = 500;
-
-                        res.end(
-                            JSON.stringify({
-                                ok: false,
-                                error: error.message
-                            })
-                        );
-
-                        return;
-                    }
-
-
-                    console.log(
-                        "LEVEL CREATED",
-                        created
-                    );
-
-
-                    // Immediately refresh the monitored symbol set.
-                    await refreshLevels();
-
-
-                    res.end(
-                        JSON.stringify({
-                            ok: true,
-                            level: created
-                        })
-                    );
-
-                }
+            res.end(
+                JSON.stringify({
+                    ok: true,
+                    service: "Render Binance Alert Monitor GS"
+                })
             );
-
-            return;
         }
+    );
 
+// =============================== // START SERVER //
+===============================
 
-        res.end(
-            JSON.stringify({
-                ok: true,
-                service: "Render Binance Monitor GS"
-            })
-        );
-    }
-);
+server.listen( process.env.PORT || 10000, () => { console.log( “HTTP
+server started” );
 
+        refreshAlerts();
 
-// ===============================
-// START SERVER
-// ===============================
-
-server.listen(
-    process.env.PORT || 10000,
-    () => {
-
-        console.log(
-            "HTTP server started"
-        );
-
-        // Initial read of levels created from the graph.
-        refreshLevels();
-
-        // Keep Supabase levels synchronized with the monitor.
+        // Keep alert definitions synchronized with Supabase.
         setInterval(
-            refreshLevels,
+            refreshAlerts,
             5000
         );
 
+        // 24h ticker supplies turnover/volume/24h change
+        // and drives evaluation of all generic conditions.
+        setInterval(
+            fetch24hMarketData,
+            MARKET_REFRESH_MS
+        );
+
+        // Run immediately instead of waiting for the first interval.
+        fetch24hMarketData();
     }
+
 );
