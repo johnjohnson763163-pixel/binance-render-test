@@ -15,6 +15,7 @@ console.log("SUPABASE CHECK:", {
     url: !!process.env.SUPABASE_URL,
     key: !!process.env.SUPABASE_SERVICE_KEY
 });
+console.log("TELEGRAM CONFIG:", { token: !!process.env.TELEGRAM_TOKEN, chat: !!process.env.TELEGRAM_CHAT });
 
 // ===============================
 // TELEGRAM
@@ -46,6 +47,8 @@ async function sendTelegram(text) {
         );
 
         const result = await response.json().catch(() => ({}));
+
+        console.log("TELEGRAM HTTP:", response.status, result.ok === true ? "OK" : (result.description || "FAILED"));
 
         if (!response.ok || result.ok === false) {
             console.log(
@@ -606,6 +609,8 @@ async function checkSignalLevels(symbol, price) {
             const alertId =
                 await getOrCreateLevelAlert(level);
 
+            console.log("SIGNAL EVENT: recording", { alertId, symbol: normalizedSymbol, level: levelPrice, telegramSent: sent });
+
             await recordAlertEvent({
                 alertId,
                 alertName: title,
@@ -1011,12 +1016,10 @@ async function refreshAlerts() {
             [...symbols].sort().join(",");
 
         console.log(
-            "ALERTS:",
-            alerts.length,
-            "LEVELS:",
-            levels.length,
-            "SYMBOLS:",
-            [...symbols].join(", ") || "dynamic"
+            "ALERTS:", alerts.length,
+            "LEVELS:", levels.length,
+            "LEVEL DETAILS:", levels.map(level => ({ id: level.id, symbol: normalizeSymbol(level.symbol), price: level.price, active: level.active, triggered: level.triggered })),
+            "SYMBOLS:", [...symbols].join(", ") || "dynamic"
         );
 
         if (nextKey !== tradeSymbolsKey) {
